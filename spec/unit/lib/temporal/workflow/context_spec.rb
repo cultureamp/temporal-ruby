@@ -9,7 +9,13 @@ require 'temporal/metadata/workflow'
 require 'time'
 
 class MyTestWorkflow < Temporal::Workflow; end
-class MyTestActivity < Temporal::Activity; end
+class MyTestActivity < Temporal::Activity
+  RETURN_VALUE = 'this-is-a-return-value'.freeze
+
+  def execute
+    RETURN_VALUE
+  end
+end
 
 describe Temporal::Workflow::Context do
   let(:state_manager) { instance_double('Temporal::Workflow::StateManager') }
@@ -82,12 +88,26 @@ describe Temporal::Workflow::Context do
           input: [],
           task_queue: 'default-task-queue',
           retry_policy: nil,
-          timeouts: {:execution => 315360000, :run => 315360000, :task => 10, :schedule_to_close => nil, :schedule_to_start => nil, :start_to_close => 30, :heartbeat => nil},
+          timeouts: {execution: 315360000, run: 315360000, task: 10, schedule_to_close: nil, schedule_to_start: nil, start_to_close: 30, heartbeat: nil, default_heartbeat_throttle_interval: 30, max_heartbeat_throttle_interval: 60},
           headers: { 'test' => 'asdf' }
         ))
         allow(dispatcher).to receive(:register_handler)
         workflow_context.execute_activity(MyTestActivity)
       end
+    end
+  end
+
+  describe '#execute_local_activity' do
+    it 'executes and schedules command' do
+      expect(state_manager).to receive(:next_side_effect)
+      expect(state_manager).to receive(:schedule).with(
+        Temporal::Workflow::Command::RecordMarker.new(
+          name: 'SIDE_EFFECT',
+          details: MyTestActivity::RETURN_VALUE
+        )
+      )
+      return_value = workflow_context.execute_local_activity(MyTestActivity)
+      expect(return_value).to eq(MyTestActivity::RETURN_VALUE)
     end
   end
 

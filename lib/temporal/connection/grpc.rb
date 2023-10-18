@@ -2,6 +2,7 @@ require 'grpc'
 require 'time'
 require 'google/protobuf/well_known_types'
 require 'securerandom'
+require 'json'
 require 'gen/temporal/api/filter/v1/message_pb'
 require 'gen/temporal/api/workflowservice/v1/service_services_pb'
 require 'gen/temporal/api/operatorservice/v1/service_services_pb'
@@ -21,7 +22,7 @@ module Temporal
 
       HISTORY_EVENT_FILTER = {
         all: Temporalio::Api::Enums::V1::HistoryEventFilterType::HISTORY_EVENT_FILTER_TYPE_ALL_EVENT,
-        close: Temporalio::Api::Enums::V1::HistoryEventFilterType::HISTORY_EVENT_FILTER_TYPE_CLOSE_EVENT,
+        close: Temporalio::Api::Enums::V1::HistoryEventFilterType::HISTORY_EVENT_FILTER_TYPE_CLOSE_EVENT
       }.freeze
 
       QUERY_REJECT_CONDITION = {
@@ -37,12 +38,17 @@ module Temporal
         double: Temporalio::Api::Enums::V1::IndexedValueType::INDEXED_VALUE_TYPE_DOUBLE,
         bool: Temporalio::Api::Enums::V1::IndexedValueType::INDEXED_VALUE_TYPE_BOOL,
         datetime: Temporalio::Api::Enums::V1::IndexedValueType::INDEXED_VALUE_TYPE_DATETIME,
-        keyword_list: Temporalio::Api::Enums::V1::IndexedValueType::INDEXED_VALUE_TYPE_KEYWORD_LIST,
+        keyword_list: Temporalio::Api::Enums::V1::IndexedValueType::INDEXED_VALUE_TYPE_KEYWORD_LIST
       }.freeze
 
       INDEXED_VALUE_TYPE_TO_SYMBOL = SYMBOL_TO_INDEXED_VALUE_TYPE.map do |symbol, int_value|
         [Temporalio::Api::Enums::V1::IndexedValueType.lookup(int_value), symbol]
       end.to_h.freeze
+
+      SYMBOL_TO_RESET_REAPPLY_TYPE = {
+        signal: Temporalio::Api::Enums::V1::ResetReapplyType::RESET_REAPPLY_TYPE_SIGNAL,
+        none: Temporalio::Api::Enums::V1::ResetReapplyType::RESET_REAPPLY_TYPE_NONE
+      }
 
       DEFAULT_OPTIONS = {
         max_page_size: 100
@@ -68,7 +74,7 @@ module Temporal
           workflow_execution_retention_period: Google::Protobuf::Duration.new(
             seconds: (retention_period * 24 * 60 * 60).to_i
           ),
-          data: data,
+          data: data
         )
         client.register_namespace(request)
       rescue ::GRPC::AlreadyExists => e
@@ -80,8 +86,9 @@ module Temporal
         client.describe_namespace(request)
       end
 
-      def list_namespaces(page_size:, next_page_token: "")
-        request = Temporalio::Api::WorkflowService::V1::ListNamespacesRequest.new(page_size: page_size, next_page_token: next_page_token)
+      def list_namespaces(page_size:, next_page_token: '')
+        request = Temporalio::Api::WorkflowService::V1::ListNamespacesRequest.new(page_size: page_size,
+                                                                                  next_page_token: next_page_token)
         client.list_namespaces(request)
       end
 
@@ -105,10 +112,10 @@ module Temporal
         workflow_id:,
         workflow_name:,
         task_queue:,
-        input: nil,
         execution_timeout:,
         run_timeout:,
         task_timeout:,
+        input: nil,
         workflow_id_reuse_policy: nil,
         headers: nil,
         cron_schedule: nil,
@@ -140,7 +147,7 @@ module Temporal
           ),
           search_attributes: Temporalio::Api::Common::V1::SearchAttributes.new(
             indexed_fields: to_payload_map_without_codec(search_attributes || {})
-          ),
+          )
         )
 
         client.start_workflow_execution(request)
@@ -164,11 +171,10 @@ module Temporal
         if wait_for_new_event
           if timeout.nil?
             # This is an internal error.  Wrappers should enforce this.
-            raise "You must specify a timeout when wait_for_new_event = true."
+            raise 'You must specify a timeout when wait_for_new_event = true.'
           elsif timeout > SERVER_MAX_GET_WORKFLOW_EXECUTION_HISTORY_POLL
-            raise ClientError.new(
-              "You may not specify a timeout of more than #{SERVER_MAX_GET_WORKFLOW_EXECUTION_HISTORY_POLL} seconds, got: #{timeout}."
-            )
+            raise ClientError,
+                  "You may not specify a timeout of more than #{SERVER_MAX_GET_WORKFLOW_EXECUTION_HISTORY_POLL} seconds, got: #{timeout}."
           end
         end
         request = Temporalio::Api::WorkflowService::V1::GetWorkflowExecutionHistoryRequest.new(
@@ -197,6 +203,7 @@ module Temporal
 
         poll_mutex.synchronize do
           return unless can_poll?
+
           @poll_request = client.poll_workflow_task_queue(request, return_op: true)
         end
 
@@ -210,20 +217,26 @@ module Temporal
           namespace: namespace,
           completed_type: query_result_proto.result_type,
           query_result: query_result_proto.answer,
-          error_message: query_result_proto.error_message,
+          error_message: query_result_proto.error_message
         )
 
         client.respond_query_task_completed(request)
       end
 
-      def respond_workflow_task_completed(namespace:, task_token:, commands:, binary_checksum:, query_results: {})
+      def respond_workflow_task_completed(namespace:, task_token:, commands:, binary_checksum:, new_sdk_flags_used:, query_results: {})
         request = Temporalio::Api::WorkflowService::V1::RespondWorkflowTaskCompletedRequest.new(
           namespace: namespace,
           identity: identity,
           task_token: task_token,
           commands: Array(commands).map { |(_, command)| Serializer.serialize(command) },
           query_results: query_results.transform_values { |value| Serializer.serialize(value) },
-          binary_checksum: binary_checksum
+          binary_checksum: binary_checksum,
+          sdk_metadata: if new_sdk_flags_used.any?
+                          Temporalio::Api::Sdk::V1::WorkflowTaskCompletedMetadata.new(
+                            lang_used_flags: new_sdk_flags_used.to_a
+                          )
+                          # else nil
+                        end
         )
 
         client.respond_workflow_task_completed(request)
@@ -252,6 +265,7 @@ module Temporal
 
         poll_mutex.synchronize do
           return unless can_poll?
+
           @poll_request = client.poll_activity_task_queue(request, return_op: true)
         end
 
@@ -277,7 +291,7 @@ module Temporal
           namespace: namespace,
           identity: identity,
           task_token: task_token,
-          result: to_result_payloads(result),
+          result: to_result_payloads(result)
         )
         client.respond_activity_task_completed(request)
       end
@@ -354,27 +368,22 @@ module Temporal
         workflow_id:,
         workflow_name:,
         task_queue:,
-        input: nil,
-        execution_timeout:,
-        run_timeout:,
-        task_timeout:,
+        execution_timeout:, run_timeout:, task_timeout:, signal_name:, signal_input:, input: nil,
         workflow_id_reuse_policy: nil,
         headers: nil,
         cron_schedule: nil,
-        signal_name:,
-        signal_input:,
         memo: nil,
         search_attributes: nil
       )
         proto_header_fields = if headers.nil?
-            to_payload_map({})
-        elsif headers.class == Hash
-            to_payload_map(headers)
-        else
-          # Preserve backward compatability for headers specified using proto objects
-          warn '[DEPRECATION] Specify headers using a hash rather than protobuf objects'
-          headers
-        end
+                                to_payload_map({})
+                              elsif headers.instance_of?(Hash)
+                                to_payload_map(headers)
+                              else
+                                # Preserve backward compatability for headers specified using proto objects
+                                warn '[DEPRECATION] Specify headers using a hash rather than protobuf objects'
+                                headers
+                              end
 
         request = Temporalio::Api::WorkflowService::V1::SignalWithStartWorkflowExecutionRequest.new(
           identity: identity,
@@ -393,7 +402,7 @@ module Temporal
           workflow_task_timeout: task_timeout,
           request_id: SecureRandom.uuid,
           header: Temporalio::Api::Common::V1::Header.new(
-            fields: proto_header_fields,
+            fields: proto_header_fields
           ),
           cron_schedule: cron_schedule,
           signal_name: signal_name,
@@ -403,22 +412,31 @@ module Temporal
           ),
           search_attributes: Temporalio::Api::Common::V1::SearchAttributes.new(
             indexed_fields: to_payload_map_without_codec(search_attributes || {})
-          ),
+          )
         )
 
         client.signal_with_start_workflow_execution(request)
       end
 
-      def reset_workflow_execution(namespace:, workflow_id:, run_id:, reason:, workflow_task_event_id:)
+      def reset_workflow_execution(namespace:, workflow_id:, run_id:, reason:, workflow_task_event_id:, request_id:, reset_reapply_type: Temporal::ResetReapplyType::SIGNAL)
         request = Temporalio::Api::WorkflowService::V1::ResetWorkflowExecutionRequest.new(
           namespace: namespace,
           workflow_execution: Temporalio::Api::Common::V1::WorkflowExecution.new(
             workflow_id: workflow_id,
-            run_id: run_id,
+            run_id: run_id
           ),
           reason: reason,
-          workflow_task_finish_event_id: workflow_task_event_id
+          workflow_task_finish_event_id: workflow_task_event_id,
+          request_id: request_id
         )
+
+        if reset_reapply_type
+          reapply_type = SYMBOL_TO_RESET_REAPPLY_TYPE[reset_reapply_type]
+          raise Client::ArgumentError, 'Unknown reset_reapply_type specified' unless reapply_type
+
+          request.reset_reapply_type = reapply_type
+        end
+
         client.reset_workflow_execution(request)
       end
 
@@ -434,7 +452,7 @@ module Temporal
           namespace: namespace,
           workflow_execution: Temporalio::Api::Common::V1::WorkflowExecution.new(
             workflow_id: workflow_id,
-            run_id: run_id,
+            run_id: run_id
           ),
           reason: reason,
           details: to_details_payloads(details)
@@ -498,9 +516,8 @@ module Temporal
         attributes.each_value do |symbol_type|
           next if SYMBOL_TO_INDEXED_VALUE_TYPE.include?(symbol_type)
 
-          raise Temporal::InvalidSearchAttributeTypeFailure.new(
-            "Cannot add search attributes (#{attributes}): unknown search attribute type :#{symbol_type}, supported types: #{SYMBOL_TO_INDEXED_VALUE_TYPE.keys}"
-          )
+          raise Temporal::InvalidSearchAttributeTypeFailure,
+                "Cannot add search attributes (#{attributes}): unknown search attribute type :#{symbol_type}, supported types: #{SYMBOL_TO_INDEXED_VALUE_TYPE.keys}"
         end
 
         request = Temporalio::Api::OperatorService::V1::AddSearchAttributesRequest.new(
@@ -510,12 +527,12 @@ module Temporal
         begin
           operator_client.add_search_attributes(request)
         rescue ::GRPC::AlreadyExists => e
-          raise Temporal::SearchAttributeAlreadyExistsFailure.new(e)
+          raise Temporal::SearchAttributeAlreadyExistsFailure, e
         rescue ::GRPC::Internal => e
           # The internal workflow that adds search attributes can fail for a variety of reasons such
           # as recreating a removed attribute with a new type. Wrap these all up into a fall through
           # exception.
-          raise Temporal::SearchAttributeFailure.new(e)
+          raise Temporal::SearchAttributeFailure, e
         end
       end
 
@@ -535,7 +552,7 @@ module Temporal
         begin
           operator_client.remove_search_attributes(request)
         rescue ::GRPC::NotFound => e
-          raise Temporal::NotFoundFailure.new(e)
+          raise Temporal::NotFoundFailure, e
         end
       end
 
@@ -608,16 +625,52 @@ module Temporal
         end
       end
 
+      def get_system_info
+        client.get_system_info(Temporalio::Api::WorkflowService::V1::GetSystemInfoRequest.new)
+      end
+
       private
 
       attr_reader :url, :identity, :credentials, :options, :poll_mutex, :poll_request
 
       def client
-        @client ||= Temporalio::Api::WorkflowService::V1::WorkflowService::Stub.new(
+        return @client if @client
+
+        channel_args = {}
+
+        if options[:keepalive_time_ms]
+          channel_args["grpc.keepalive_time_ms"] = options[:keepalive_time_ms]
+        end
+
+        if options[:retry_connection]
+          channel_args["grpc.enable_retries"] = 1
+
+          channel_args["grpc.service_config"] = ::JSON.generate(
+            methodConfig: [
+              {
+                name: [
+                  {
+                    service: "temporal.api.workflowservice.v1.WorkflowService",
+                  }
+                ],
+                retryPolicy: {
+                  retryableStatusCodes: ["UNAVAILABLE"],
+                  maxAttempts: 3,
+                  initialBackoff: "0.1s",
+                  backoffMultiplier: 2.0,
+                  maxBackoff: "0.3s"
+                }
+              }
+            ]
+          )
+        end
+
+        @client = Temporalio::Api::WorkflowService::V1::WorkflowService::Stub.new(
           url,
           credentials,
           timeout: CONNECTION_TIMEOUT_SECONDS,
-          interceptors: [ ClientNameVersionInterceptor.new() ]
+          interceptors: [ClientNameVersionInterceptor.new],
+          channel_args: channel_args
         )
       end
 
@@ -626,7 +679,7 @@ module Temporal
           url,
           credentials,
           timeout: CONNECTION_TIMEOUT_SECONDS,
-          interceptors: [ ClientNameVersionInterceptor.new() ]
+          interceptors: [ClientNameVersionInterceptor.new]
         )
       end
 

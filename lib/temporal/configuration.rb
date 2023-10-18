@@ -1,3 +1,4 @@
+require 'temporal/capabilities'
 require 'temporal/logger'
 require 'temporal/metrics_adapters/null'
 require 'temporal/middleware/header_propagator_chain'
@@ -11,11 +12,13 @@ require 'temporal/connection/converter/codec/chain'
 
 module Temporal
   class Configuration
-    Connection = Struct.new(:type, :host, :port, :credentials, :identity, keyword_init: true)
+    Connection = Struct.new(:type, :host, :port, :credentials, :identity, :connection_options, keyword_init: true)
     Execution = Struct.new(:namespace, :task_queue, :timeouts, :headers, :search_attributes, keyword_init: true)
 
-    attr_reader :timeouts, :error_handlers
-    attr_accessor :connection_type, :converter, :use_error_serialization_v2, :host, :port, :credentials, :identity, :logger, :metrics_adapter, :namespace, :task_queue, :headers, :search_attributes, :header_propagators, :payload_codec
+    attr_reader :timeouts, :error_handlers, :capabilities
+    attr_accessor :connection_type, :converter, :use_error_serialization_v2, :host, :port, :credentials, :identity,
+                  :logger, :metrics_adapter, :namespace, :task_queue, :headers, :search_attributes, :header_propagators,
+                  :payload_codec, :legacy_signals, :connection_options
 
     # See https://docs.temporal.io/blog/activity-timeouts/ for general docs.
     # We want an infinite execution timeout for cron schedules and other perpetual workflows.
@@ -32,7 +35,16 @@ module Temporal
       # See       # https://docs.temporal.io/blog/activity-timeouts/#schedule-to-start-timeout
       schedule_to_start: nil,
       start_to_close: 30,     # Time spent processing an activity
-      heartbeat: nil          # Max time between heartbeats (off by default)
+      heartbeat: nil,         # Max time between heartbeats (off by default)
+      # If a heartbeat timeout is specified, 80% of that value will be used for throttling. If not specified, this
+      # value will be used. This default comes from the Go SDK.
+      # https://github.com/temporalio/sdk-go/blob/eaa3802876de77500164f80f378559c51d6bb0e2/internal/internal_task_handlers.go#L65
+      default_heartbeat_throttle_interval: 30,
+      # Heartbeat throttling interval will always be capped by this value. This default comes from the Go SDK.
+      # https://github.com/temporalio/sdk-go/blob/eaa3802876de77500164f80f378559c51d6bb0e2/internal/internal_task_handlers.go#L66
+      #
+      # To disable heartbeat throttling, set this timeout to 0.
+      max_heartbeat_throttle_interval: 60
     }.freeze
 
     DEFAULT_HEADERS = {}.freeze
@@ -46,7 +58,7 @@ module Temporal
         Temporal::Connection::Converter::Payload::JSON.new
       ]
     ).freeze
-    
+
     # The Payload Codec is an optional step that happens between the wire and the Payload Converter:
     # Temporal Server <--> Wire <--> Payload Codec <--> Payload Converter <--> User code
     # which can be useful for transformations such as compression and encryption
@@ -71,6 +83,16 @@ module Temporal
       @identity = nil
       @search_attributes = {}
       @header_propagators = []
+      @capabilities = Capabilities.new(self)
+      @connection_options = {}
+
+      # Signals previously were incorrectly replayed in order within a workflow task window, rather
+      # than at the beginning. Correcting this changes the determinism of any workflow with signals.
+      # This flag exists to force this legacy behavior to gradually roll out the new ordering.
+      # Because this feature depends on the SDK Metadata capability which only became available
+      # in Temporal server 1.20, it is ignored when connected to older versions and effectively
+      # treated as true.
+      @legacy_signals = false
     end
 
     def on_error(&block)
@@ -95,7 +117,8 @@ module Temporal
         host: host,
         port: port,
         credentials: credentials,
-        identity: identity || default_identity
+        identity: identity || default_identity,
+        connection_options: connection_options
       ).freeze
     end
 
@@ -111,6 +134,7 @@ module Temporal
 
     def add_header_propagator(propagator_class, *args)
       raise 'header propagator must implement `def inject!(headers)`' unless propagator_class.method_defined? :inject!
+
       @header_propagators << Middleware::Entry.new(propagator_class, args)
     end
 
