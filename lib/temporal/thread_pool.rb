@@ -56,7 +56,7 @@ module Temporal
     EXIT_SYMBOL = :exit
 
     def poll
-      Thread.current.abort_on_exception = true
+      # Thread.current.abort_on_exception = true
 
       catch(EXIT_SYMBOL) do
         loop do

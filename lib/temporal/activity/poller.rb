@@ -62,7 +62,7 @@ module Temporal
 
       def poll_loop
         # Prevent the poller thread from silently dying
-        Thread.current.abort_on_exception = true
+        # Thread.current.abort_on_exception = true
 
         last_poll_time = Time.now
         metrics_tags = { namespace: namespace, task_queue: task_queue }.freeze
