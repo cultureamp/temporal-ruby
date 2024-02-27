@@ -557,7 +557,8 @@ module Temporal
       end
 
       def reset_sticky_task_queue
-        raise NotImplementedError
+        puts "reset_sticky_task_queue called, raising standard error instead"
+        raise StandardError
       end
 
       def query_workflow(namespace:, workflow_id:, run_id:, query:, args: nil, query_reject_condition: nil)
